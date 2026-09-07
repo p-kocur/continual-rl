@@ -157,15 +157,15 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # Train both
-    vnd_trainer = train_vnd(env, device, epochs=10, steps_per_epoch=200)
-    ppo_agent = train_ppo(env, device, epochs=10, steps_per_epoch=200)
+    # vnd_trainer = train_vnd(env, device, epochs=10, steps_per_epoch=200)
+    ppo_agent = train_ppo(env, device, epochs=1000, steps_per_epoch=1000)
 
     # Evaluate
     print("\n--- Evaluation ---")
-    vnd_succ, vnd_ret = evaluate_vnd(vnd_trainer, env, episodes=10)
+    # vnd_succ, vnd_ret = evaluate_vnd(vnd_trainer, env, episodes=10)
     ppo_succ, ppo_ret = evaluate_ppo(ppo_agent, env, episodes=10)
 
-    print(f"Continual VND | Success Rate: {vnd_succ}/10 | Avg Return: {vnd_ret:.2f}")
+    # print(f"Continual VND | Success Rate: {vnd_succ}/10 | Avg Return: {vnd_ret:.2f}")
     print(f"PPO           | Success Rate: {ppo_succ}/10 | Avg Return: {ppo_ret:.2f}")
 
 if __name__ == "__main__":
