@@ -16,10 +16,11 @@ class ShipSailingEnv(gym.Env):
     """
     metadata = {"render_modes": ["ansi"]}
 
-    def __init__(self, render_mode=None):
+    def __init__(self, render_mode=None, enable_wind=True):
         super().__init__()
         self.render_mode = render_mode
         self.grid_size = 20.0
+        self.enable_wind = enable_wind
 
         # Observation: target_dx, target_dy, 8 raycasts
         self.observation_space = spaces.Box(low=-self.grid_size, high=self.grid_size, shape=(10,), dtype=np.float32)
@@ -34,13 +35,15 @@ class ShipSailingEnv(gym.Env):
             3: np.array([0.0, 1.0], dtype=np.float32),  # Down
         }
 
-        self.target = np.array([18.0, 18.0], dtype=np.float32)
+        self.target = np.array([18.0, 20.0], dtype=np.float32)
 
         # Define some obstacles as [x_min, x_max, y_min, y_max] scaled down for 20x20
         self.obstacles = [
-            [4, 6, 0, 12],
-            [10, 12, 8, 20],
-            [16, 18, 0, 15]
+            [4, 6, 6, 12],
+            [10, 12, 8, 15],
+            [13, 16, 9, 12],
+            [14, 20, 0, 5],
+            [0, 15, 17, 20],
         ]
 
         self.max_steps = 100
@@ -51,7 +54,7 @@ class ShipSailingEnv(gym.Env):
         super().reset(seed=seed)
         self.state = np.array([2.0, 2.0], dtype=np.float32)
         self.step_count = 0
-        self.wind = np.array([0.0, 0.0], dtype=np.float32) # Wind disabled
+        self._sample_wind()
 
         return self._get_obs(), {"true_state": self.state.copy()}
 
@@ -91,8 +94,12 @@ class ShipSailingEnv(gym.Env):
         return np.concatenate([target_vec, rays]).astype(np.float32)
 
     def _sample_wind(self):
-        # Wind disabled for this test
-        self.wind = np.array([0.0, 0.0], dtype=np.float32)
+        if self.enable_wind:
+            angle = self.np_random.uniform(0, 2 * np.pi)
+            mag = self.np_random.uniform(0.1, 0.5)
+            self.wind = np.array([mag * np.cos(angle), mag * np.sin(angle)], dtype=np.float32)
+        else:
+            self.wind = np.array([0.0, 0.0], dtype=np.float32)
 
     def _in_obstacle(self, pos):
         x, y = pos
@@ -131,7 +138,7 @@ class ShipSailingEnv(gym.Env):
            next_state[1] < 0 or next_state[1] > self.grid_size:
             # Simple bounce (stay in place)
             next_state = self.state
-            reward = -1.0  # Penalty for collision
+            reward = -10.0  # Penalty for collision
         else:
             # Reward is negative distance to target
             dist = np.linalg.norm(next_state - self.target)
@@ -139,9 +146,9 @@ class ShipSailingEnv(gym.Env):
 
         self.state = np.clip(next_state, 0, self.grid_size).astype(np.float32)
 
-        terminated = np.linalg.norm(self.state - self.target) < 1.5
+        terminated = np.linalg.norm(self.state - self.target) < 2.5
         if terminated:
-            reward += 50.0
+            reward += 100.0
 
         truncated = self.step_count >= self.max_steps
 
