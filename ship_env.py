@@ -56,6 +56,7 @@ class ShipSailingEnv(gym.Env):
         angle = self.np_random.uniform(0, 2 * np.pi)
         mag = self.np_random.uniform(0.1, 0.5)
         self.wind = np.array([mag * np.cos(angle), mag * np.sin(angle)], dtype=np.float32)
+        self.wind = 0 # For now to test PPO
 
     def _in_obstacle(self, pos):
         x, y = pos
@@ -94,7 +95,7 @@ class ShipSailingEnv(gym.Env):
            next_state[1] < 0 or next_state[1] > self.grid_size:
             # Simple bounce (stay in place)
             next_state = self.state
-            reward = -2.0  # Penalty for collision
+            reward = -10.0  # Penalty for collision
         else:
             # Reward is negative distance to target
             dist = np.linalg.norm(next_state - self.target)
@@ -102,9 +103,9 @@ class ShipSailingEnv(gym.Env):
 
         self.state = np.clip(next_state, 0, self.grid_size).astype(np.float32)
 
-        terminated = np.linalg.norm(self.state - self.target) < 2.0
+        terminated = np.linalg.norm(self.state - self.target) < 5.0
         if terminated:
-            reward += 100.0
+            reward += 1000.0
 
         truncated = self.step_count >= self.max_steps
 
