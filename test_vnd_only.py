@@ -5,13 +5,52 @@ from continual_vnd import ContinualVNDTrainer
 from compare import TrueStateEnvWrapper
 
 def f_prior(state, action):
-    return state + action
+    # Nominal next state
+    next_state = state + action
+
+    # Differentiable obstacles to allow BPTT to learn to route around them.
+    # [x_min, x_max, y_min, y_max]
+    obstacles = [
+        torch.tensor([4.0, 6.0, 6.0, 12.0], device=state.device),
+        torch.tensor([10.0, 12.0, 8.0, 15.0], device=state.device),
+        torch.tensor([13.0, 16.0, 9.0, 12.0], device=state.device),
+        torch.tensor([14.0, 20.0, 0.0, 5.0], device=state.device),
+        torch.tensor([0.0, 15.0, 17.0, 20.0], device=state.device)
+    ]
+
+    repulsion = torch.zeros_like(state)
+    temp = 5.0 # Sharpness of the wall
+
+    for obs in obstacles:
+        # Smooth box intersection
+        in_x = torch.sigmoid(temp * (next_state[:, 0] - obs[0])) * torch.sigmoid(temp * (obs[1] - next_state[:, 0]))
+        in_y = torch.sigmoid(temp * (next_state[:, 1] - obs[2])) * torch.sigmoid(temp * (obs[3] - next_state[:, 1]))
+
+        is_inside = in_x * in_y
+
+        # Repulsive force counters the action if entering an obstacle
+        repulsion -= action * is_inside.unsqueeze(-1)
+
+    # Also add differentiable bounds for the 20x20 grid
+    bound_x_low = torch.sigmoid(temp * (-next_state[:, 0]))
+    bound_x_high = torch.sigmoid(temp * (next_state[:, 0] - 20.0))
+    bound_y_low = torch.sigmoid(temp * (-next_state[:, 1]))
+    bound_y_high = torch.sigmoid(temp * (next_state[:, 1] - 20.0))
+
+    out_of_bounds = torch.clamp(bound_x_low + bound_x_high + bound_y_low + bound_y_high, 0.0, 1.0)
+    repulsion -= action * out_of_bounds.unsqueeze(-1)
+
+    return next_state + repulsion
 
 def reward_fn(state, action, next_state):
-    target = torch.tensor([18.0, 18.0], dtype=torch.float32, device=state.device)
+    target = torch.tensor([18.0, 20.0], dtype=torch.float32, device=state.device)
     dist = torch.norm(next_state - target, dim=-1)
+
+    # Give a massive reward for getting close to the target to overcome the gradient plateau
+    success_reward = torch.sigmoid(5.0 * (2.5 - dist)) * 50.0
+
     bounds_penalty = torch.sum(torch.relu(-next_state) + torch.relu(next_state - 20.0), dim=-1)
-    return -dist * 0.1 - bounds_penalty * 2.0
+    return -dist * 0.1 - bounds_penalty * 2.0 + success_reward
 
 def evaluate_vnd(trainer, env, episodes=5):
     vnd_env = TrueStateEnvWrapper(env)
