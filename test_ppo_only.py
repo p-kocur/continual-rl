@@ -4,6 +4,7 @@ from ship_env import ShipSailingEnv
 from baseline_ppo import PPOTrainer
 
 def evaluate_ppo(agent, env, episodes=5):
+    env.render_mode = "ansi"
     successes = 0
     avg_return = 0
 
@@ -17,6 +18,8 @@ def evaluate_ppo(agent, env, episodes=5):
 
             obs, reward, terminated, truncated, _ = env.step(action)
             ep_return += reward
+            print(f"Step: {env.step_count}, State: {env.state}, Action: {action}, Reward: {reward}")
+            print(env.render())
 
             if terminated:
                 successes += 1
@@ -29,7 +32,7 @@ def evaluate_ppo(agent, env, episodes=5):
     return successes, avg_return / episodes
 
 def main():
-    env = ShipSailingEnv()
+    env = ShipSailingEnv(enable_wind=False)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
 
@@ -45,7 +48,7 @@ def main():
         device=device
     )
 
-    epochs = 50
+    epochs = 70
     steps_per_epoch = 1000
     update_timestep = 1000
     time_step = 0
