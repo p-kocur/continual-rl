@@ -1,40 +1,37 @@
 import torch
 import numpy as np
+import os
+from continual_vnd import ContinualVNDTrainer
+from ship_env import ShipSailingEnv
 
-# A dummy gym-like environment interface for testing
-class DummyEnv:
-    def __init__(self, state_dim, action_dim):
-        self.state_dim = state_dim
-        self.action_dim = action_dim
-        self.state = np.zeros(state_dim)
-
-    def reset(self):
-        self.state = np.random.randn(self.state_dim).astype(np.float32)
-        return self.state, {}
-
-    def step(self, action):
-        # A simple linear transition: s_{t+1} = s_t + a_t + noise
-        self.state = self.state + np.pad(action, (0, self.state_dim - self.action_dim)) + np.random.randn(self.state_dim).astype(np.float32) * 0.1
-        reward = -np.sum(self.state**2)  # Try to keep state near origin
-        terminated = False
-        truncated = False
-        return self.state, reward, terminated, truncated, {}
-
-# User-provided analytic prior: assume no change, s_{t+1} = s_t
+# PyTorch differentiable nominal physics prior: s_{t+1} = s_t + a_t
 def f_prior(state, action):
-    return state
+    return state + action
 
-# User-provided differentiable reward function for BPTT
+# Differentiable reward function to train the policy over simulated rollouts
 def reward_fn(state, action, next_state):
     # Differentiable version of the environment reward
-    return -torch.sum(next_state**2, dim=-1)
+    # state/next_state shape: (B, 2)
+    target = torch.tensor([45.0, 45.0], dtype=torch.float32, device=state.device)
+
+    # Distance penalty
+    dist = torch.norm(next_state - target, dim=-1)
+
+    # Simple bounds penalty to keep it in the 50x50 grid
+    bounds_penalty = torch.sum(torch.relu(-next_state) + torch.relu(next_state - 50.0), dim=-1)
+
+    # We omit hard obstacle collision penalties here to keep the reward function smooth
+    # The latent dynamics D(s,a,z) should ideally predict collisions and stop the ship.
+    return -dist * 0.1 - bounds_penalty * 2.0
 
 def main():
-    from continual_vnd import ContinualVNDTrainer
-
-    state_dim = 4
+    state_dim = 2
     action_dim = 2
-    env = DummyEnv(state_dim, action_dim)
+
+    env = ShipSailingEnv()
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Using device: {device}")
 
     trainer = ContinualVNDTrainer(
         state_dim=state_dim,
@@ -42,26 +39,51 @@ def main():
         f_prior=f_prior,
         reward_fn=reward_fn,
         context_len=5,
-        latent_dim=8,
-        hidden_dim=32,
-        buffer_capacity=1000
+        latent_dim=16,
+        hidden_dim=64,
+        buffer_capacity=10000,
+        device=device
     )
 
-    # 1. Collect some initial experience
+    # 1. Collect some initial experience (random or poorly initialized policy)
     print("Collecting initial experience...")
-    trainer.collect_experience(env, num_steps=200)
+    for _ in range(5):
+        trainer.collect_experience(env, num_steps=200)
 
-    # 2. Train VND
-    print("Training VND model...")
-    for _ in range(50):
-        vnd_logs = trainer.update_vnd(batch_size=32)
-    print("VND logs:", vnd_logs)
+    epochs = 10
 
-    # 3. Train Policy using differentiable simulator
-    print("Training Policy...")
-    for _ in range(50):
-        policy_logs = trainer.update_policy(rollout_length=10, batch_size=32)
-    print("Policy logs:", policy_logs)
+    for epoch in range(epochs):
+        print(f"\n--- Epoch {epoch + 1}/{epochs} ---")
+
+        # 2. Train VND model
+        vnd_losses = []
+        for _ in range(50):
+            logs = trainer.update_vnd(batch_size=64)
+            if logs:
+                vnd_losses.append(logs['loss_vnd_total'])
+
+        if vnd_losses:
+            print(f"Average VND Loss: {np.mean(vnd_losses):.4f}")
+
+        # 3. Train Policy
+        policy_losses = []
+        for _ in range(50):
+            logs = trainer.update_policy(rollout_length=15, batch_size=64)
+            if logs:
+                policy_losses.append(logs['loss_policy'])
+
+        if policy_losses:
+            print(f"Average Policy Loss: {np.mean(policy_losses):.4f}")
+
+        # 4. Collect more experience with updated policy
+        avg_reward = trainer.collect_experience(env, num_steps=200)
+        print(f"Collected Experience Avg Reward: {avg_reward:.2f}")
+
+    # Save models
+    os.makedirs("checkpoints", exist_ok=True)
+    torch.save(trainer.encoder.state_dict(), "checkpoints/encoder.pth")
+    torch.save(trainer.policy.state_dict(), "checkpoints/policy.pth")
+    print("\nModels saved to checkpoints directory.")
 
 if __name__ == "__main__":
     main()
