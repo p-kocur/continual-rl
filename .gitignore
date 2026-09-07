@@ -3,3 +3,4 @@ __pycache__/
 paper.pdf
 paper.txt
 checkpoints/
+*.egg-info/
