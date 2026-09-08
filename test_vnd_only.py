@@ -113,6 +113,8 @@ def main():
     steps_per_epoch = 1000
 
     print("--- Training Continual VND ---")
+    print("Epoch | Dyn Loss | Rec Loss | MMD Loss | Policy Loss | Avg Reward")
+    print("------+----------+----------+----------+-------------+-----------")
 
     # Collect initial buffer
     for _ in range(5):
@@ -120,13 +122,28 @@ def main():
 
     for epoch in range(epochs):
         # We increase the number of optimization steps to match the 1000 steps_per_epoch intensity of PPO
-        for _ in range(250): trainer.update_vnd(batch_size=64)
-        for _ in range(250): trainer.update_policy(rollout_length=15, batch_size=64)
+        vnd_losses = {"loss_dyn": [], "loss_rec": [], "loss_mmd": []}
+        for _ in range(250):
+            logs = trainer.update_vnd(batch_size=64)
+            if logs:
+                for loss_name in vnd_losses:
+                    vnd_losses[loss_name].append(logs[loss_name])
+
+        policy_losses = []
+        for _ in range(250):
+            logs = trainer.update_policy(rollout_length=15, batch_size=64)
+            if logs:
+                policy_losses.append(logs["loss_policy"])
 
         avg_reward = trainer.collect_experience(vnd_env, num_steps=steps_per_epoch)
-
-        if (epoch + 1) % 5 == 0:
-            print(f"Epoch {epoch+1:02d}, Collected Experience Avg Reward: {avg_reward:.2f}")
+        avg_dyn_loss = np.mean(vnd_losses["loss_dyn"]) if vnd_losses["loss_dyn"] else float("nan")
+        avg_rec_loss = np.mean(vnd_losses["loss_rec"]) if vnd_losses["loss_rec"] else float("nan")
+        avg_mmd_loss = np.mean(vnd_losses["loss_mmd"]) if vnd_losses["loss_mmd"] else float("nan")
+        avg_policy_loss = np.mean(policy_losses) if policy_losses else float("nan")
+        print(
+            f"{epoch + 1:5d} | {avg_dyn_loss:8.4f} | {avg_rec_loss:8.4f} | "
+            f"{avg_mmd_loss:8.4f} | {avg_policy_loss:11.4f} | {avg_reward:9.2f}"
+        )
 
     print("\n--- Evaluation ---")
     succ, ret = evaluate_vnd(trainer, env, episodes=10)
