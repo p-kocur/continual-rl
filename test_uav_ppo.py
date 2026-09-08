@@ -2,15 +2,24 @@ import torch
 import numpy as np
 from uav_env import UAVEnv
 from baseline_ppo import ContinuousPPOTrainer
+from visualize import plot_uav_trajectory
 
 def evaluate_ppo(agent, env, episodes=5):
     avg_return = 0
 
-    for _ in range(episodes):
+    for ep in range(episodes):
         obs, _ = env.reset()
         ep_return = 0
 
+        uav_xs, uav_ys = [], []
+        ref_xs, ref_ys = [], []
+
         for _ in range(env.max_steps):
+            uav_xs.append(obs[0])
+            uav_ys.append(obs[1])
+            ref_xs.append(obs[4])
+            ref_ys.append(obs[5])
+
             with torch.no_grad():
                 obs_tensor = torch.FloatTensor(obs).unsqueeze(0).to(agent.device)
                 action_mean = agent.policy_old.actor(obs_tensor)
@@ -21,6 +30,11 @@ def evaluate_ppo(agent, env, episodes=5):
 
             if terminated or truncated:
                 break
+
+        if ep == 0:
+            plot_uav_trajectory(uav_xs, uav_ys, ref_xs, ref_ys,
+                                "PPO - UAV Trajectory Tracking (No Wind)",
+                                "trajectory_ppo.png")
 
         avg_return += ep_return
 

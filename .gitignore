@@ -4,3 +4,4 @@ paper.pdf
 paper.txt
 checkpoints/
 *.egg-info/
+plots/

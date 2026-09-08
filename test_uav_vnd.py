@@ -3,6 +3,7 @@ import numpy as np
 import math
 from uav_env import UAVEnv
 from continual_vnd import ContinualVNDTrainer
+from visualize import plot_uav_trajectory
 
 def f_prior(state, action):
     # state: [B, 4] -> px, py, vx, vy
@@ -118,12 +119,21 @@ def evaluate_uav(trainer, env, episodes=5):
     trainer.policy.eval()
     avg_return = 0
 
-    for _ in range(episodes):
+    for ep in range(episodes):
         state, _ = vnd_env.reset()
         history = []
         ep_return = 0
 
+        uav_xs, uav_ys = [], []
+        ref_xs, ref_ys = [], []
+
         for _ in range(vnd_env.max_steps):
+            # Record trajectory
+            uav_xs.append(state[0])
+            uav_ys.append(state[1])
+            ref_xs.append(state[4])
+            ref_ys.append(state[5])
+
             if len(history) < trainer.context_len:
                 pad = trainer.context_len - len(history)
                 states = [np.zeros(8)] * pad + [h[0] for h in history]
@@ -138,7 +148,7 @@ def evaluate_uav(trainer, env, episodes=5):
             with torch.no_grad():
                 z = trainer.encoder(ctx_states, ctx_actions)
                 a = trainer.policy(torch.FloatTensor(state).unsqueeze(0).to(trainer.device), z)
-                action = a.squeeze(0).cpu().numpy()
+                action = (a * 5.0).squeeze(0).cpu().numpy()
 
             next_state, reward, terminated, truncated, _ = vnd_env.step(action)
             ep_return += reward
@@ -147,6 +157,13 @@ def evaluate_uav(trainer, env, episodes=5):
 
             if terminated or truncated:
                 break
+
+        # Generate plot for the very first evaluation episode
+        if ep == 0:
+            plot_uav_trajectory(uav_xs, uav_ys, ref_xs, ref_ys,
+                                "Continual VND - UAV Trajectory Tracking (With Wind)",
+                                "trajectory_vnd.png")
+
         avg_return += ep_return
     return avg_return / episodes
 
