@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.distributions import Categorical
+from torch.distributions import Categorical, MultivariateNormal
 import numpy as np
 
 class RolloutBuffer:
@@ -117,6 +117,149 @@ class PPOTrainer:
         old_actions = torch.squeeze(torch.tensor(self.buffer.actions)).detach().to(self.device)
         old_logprobs = torch.squeeze(torch.stack(self.buffer.logprobs, dim=0)).detach().to(self.device)
         old_state_values = torch.squeeze(torch.stack(self.buffer.state_values, dim=0)).detach().to(self.device)
+
+        # Calculate advantages
+        advantages = rewards.detach() - old_state_values.detach()
+
+        # Optimize policy for K epochs
+        for _ in range(self.K_epochs):
+            # Evaluating old actions and values
+            logprobs, state_values, dist_entropy = self.policy.evaluate(old_states, old_actions)
+
+            # Match state_values tensor dimensions with rewards tensor
+            state_values = torch.squeeze(state_values)
+
+            # Finding the ratio (pi_theta / pi_theta__old)
+            ratios = torch.exp(logprobs - old_logprobs.detach())
+
+            # Finding Surrogate Loss
+            surr1 = ratios * advantages
+            surr2 = torch.clamp(ratios, 1 - self.eps_clip, 1 + self.eps_clip) * advantages
+
+            # Final loss of clipped objective PPO
+            loss = -torch.min(surr1, surr2) + 0.5 * self.MseLoss(state_values, rewards) - 0.01 * dist_entropy
+
+            # Take gradient step
+            self.optimizer.zero_grad()
+            loss.mean().backward()
+            self.optimizer.step()
+
+        # Copy new weights into old policy
+        self.policy_old.load_state_dict(self.policy.state_dict())
+        self.buffer.clear()
+
+class ContinuousActorCritic(nn.Module):
+    def __init__(self, state_dim, action_dim, hidden_dim=64, action_std_init=0.6):
+        super(ContinuousActorCritic, self).__init__()
+
+        self.action_dim = action_dim
+        self.action_var = torch.full((action_dim,), action_std_init * action_std_init)
+
+        # Actor network
+        self.actor = nn.Sequential(
+            nn.Linear(state_dim, hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, action_dim),
+            nn.Tanh() # Assuming actions are normalized/bounded
+        )
+
+        # Critic network
+        self.critic = nn.Sequential(
+            nn.Linear(state_dim, hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, 1)
+        )
+
+    def set_action_std(self, new_action_std):
+        self.action_var = torch.full((self.action_dim,), new_action_std * new_action_std).to(next(self.parameters()).device)
+
+    def forward(self):
+        raise NotImplementedError
+
+    def act(self, state):
+        action_mean = self.actor(state)
+        # Action scale for UAV is [-5, 5], so we scale the Tanh output
+        action_mean = action_mean * 5.0
+
+        cov_mat = torch.diag(self.action_var).unsqueeze(dim=0).to(state.device)
+        dist = MultivariateNormal(action_mean, cov_mat)
+
+        action = dist.sample()
+        action_logprob = dist.log_prob(action)
+        state_val = self.critic(state)
+
+        return action.detach().cpu().numpy().flatten(), action_logprob.detach(), state_val.squeeze(-1).detach()
+
+    def evaluate(self, state, action):
+        action_mean = self.actor(state)
+        action_mean = action_mean * 5.0
+
+        action_var = self.action_var.expand_as(action_mean).to(state.device)
+        cov_mat = torch.diag_embed(action_var)
+        dist = MultivariateNormal(action_mean, cov_mat)
+
+        action_logprobs = dist.log_prob(action)
+        dist_entropy = dist.entropy()
+        state_values = self.critic(state)
+
+        return action_logprobs, state_values.squeeze(-1), dist_entropy
+
+
+class ContinuousPPOTrainer:
+    def __init__(self, state_dim, action_dim, lr_actor, lr_critic, gamma, K_epochs, eps_clip, device):
+        self.device = device
+        self.gamma = gamma
+        self.eps_clip = eps_clip
+        self.K_epochs = K_epochs
+
+        self.buffer = RolloutBuffer()
+
+        self.policy = ContinuousActorCritic(state_dim, action_dim).to(device)
+        self.optimizer = optim.Adam([
+            {'params': self.policy.actor.parameters(), 'lr': lr_actor},
+            {'params': self.policy.critic.parameters(), 'lr': lr_critic}
+        ])
+
+        self.policy_old = ContinuousActorCritic(state_dim, action_dim).to(device)
+        self.policy_old.load_state_dict(self.policy.state_dict())
+
+        self.MseLoss = nn.MSELoss()
+
+    def select_action(self, state):
+        with torch.no_grad():
+            state = torch.FloatTensor(state).unsqueeze(0).to(self.device)
+            action, action_logprob, state_val = self.policy_old.act(state)
+
+        self.buffer.states.append(state.squeeze(0))
+        self.buffer.actions.append(torch.FloatTensor(action))
+        self.buffer.logprobs.append(action_logprob.squeeze(0))
+        self.buffer.state_values.append(state_val.squeeze(0))
+
+        return action
+
+    def update(self):
+        # Monte Carlo estimate of returns
+        rewards = []
+        discounted_reward = 0
+        for reward, is_terminal in zip(reversed(self.buffer.rewards), reversed(self.buffer.is_terminals)):
+            if is_terminal:
+                discounted_reward = 0
+            discounted_reward = reward + (self.gamma * discounted_reward)
+            rewards.insert(0, discounted_reward)
+
+        # Normalizing the rewards
+        rewards = torch.tensor(rewards, dtype=torch.float32).to(self.device)
+        rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-7)
+
+        # Convert list to tensor
+        old_states = torch.stack(self.buffer.states, dim=0).detach().to(self.device)
+        old_actions = torch.stack(self.buffer.actions, dim=0).detach().to(self.device)
+        old_logprobs = torch.stack(self.buffer.logprobs, dim=0).detach().to(self.device)
+        old_state_values = torch.stack(self.buffer.state_values, dim=0).detach().to(self.device)
 
         # Calculate advantages
         advantages = rewards.detach() - old_state_values.detach()
