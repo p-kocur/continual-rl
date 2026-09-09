@@ -168,7 +168,7 @@ def main():
         device=device
     )
 
-    epochs = 10
+    epochs = 100
     steps_per_epoch = 1000
 
     print("--- Training Continual VND on UAV ---")

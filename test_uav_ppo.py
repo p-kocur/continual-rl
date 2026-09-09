@@ -43,7 +43,7 @@ def main():
         device=device
     )
 
-    epochs = 20
+    epochs = 50
     steps_per_epoch = 1000
     update_timestep = 1000
     time_step = 0
