@@ -174,17 +174,23 @@ class ContinualVNDTrainer:
             # Get action from policy
             actions = self.policy(states, z)
 
+            # Temporary workaround for UAV action scaling
+            # In a clean implementation, ContinualVNDTrainer should accept an action_scale parameter
+            scaled_actions = actions
+            if self.state_dim == 8 and self.action_dim == 2:
+                scaled_actions = actions * 5.0
+
             # Predict next state using differentiable dynamics model
             # We want gradients to flow through f_prior for BPTT, but we don't want to update f_prior's parameters if it has any
-            nominal_next_states = self.f_prior(states, actions)
+            nominal_next_states = self.f_prior(states, scaled_actions)
 
             # The residual is differentiable, but we don't want to update residual parameters here.
             # We are just computing gradients wrt actions -> policy.
-            pred_residual = self.residual(states, actions, z)
+            pred_residual = self.residual(states, scaled_actions, z)
             next_states = nominal_next_states + pred_residual
 
             # Compute reward
-            rewards = self.reward_fn(states, actions, next_states)
+            rewards = self.reward_fn(states, scaled_actions, next_states)
 
             # Maximize reward is minimize -reward
             loss_policy = loss_policy - discount * rewards.mean()
