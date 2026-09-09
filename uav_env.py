@@ -6,7 +6,7 @@ class UAVEnv(gym.Env):
     """
     Continuous 2D UAV Trajectory Tracking Environment.
     State: [px, py, vx, vy] - Position and velocity of the UAV.
-    Observation: [px, py, vx, vy, ref_px, ref_py, ref_vx, ref_vy]
+    Observation: [px, py, vx, vy, ref0, ref1, ..., refH]
     Action: [ax, ay] - Commanded accelerations.
     Hidden Context: Wind [wx, wy] altering the acceleration dynamics.
     """
@@ -20,12 +20,13 @@ class UAVEnv(gym.Env):
         self.dt = 0.1
         self.max_steps = 200
         self.wind_change_freq = 50
+        self.lookahead = 5 # Number of future reference points to include
 
         # Action: [ax, ay] bounded between [-5, 5]
         self.action_space = spaces.Box(low=-5.0, high=5.0, shape=(2,), dtype=np.float32)
 
-        # Observation: [state(4), ref_state(4)]
-        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(8,), dtype=np.float32)
+        # Observation: [state(4), ref_t(4), ref_{t+1}(4), ..., ref_{t+H-1}(4)]
+        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(4 + 4 * self.lookahead,), dtype=np.float32)
 
         self.reset()
 
@@ -67,8 +68,10 @@ class UAVEnv(gym.Env):
         return self._get_obs(), {"true_state": self.state.copy()}
 
     def _get_obs(self):
-        ref_state = self._get_reference(self.step_count)
-        return np.concatenate([self.state, ref_state]).astype(np.float32)
+        obs = [self.state]
+        for i in range(self.lookahead):
+            obs.append(self._get_reference(self.step_count + i))
+        return np.concatenate(obs).astype(np.float32)
 
     def step(self, action):
         self.step_count += 1

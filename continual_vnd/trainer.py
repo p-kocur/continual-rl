@@ -177,7 +177,7 @@ class ContinualVNDTrainer:
             # Temporary workaround for UAV action scaling
             # In a clean implementation, ContinualVNDTrainer should accept an action_scale parameter
             scaled_actions = actions
-            if self.state_dim == 8 and self.action_dim == 2:
+            if self.state_dim == 24 and self.action_dim == 2:
                 scaled_actions = actions * 5.0
 
             # Predict next state using differentiable dynamics model
