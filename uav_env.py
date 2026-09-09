@@ -34,10 +34,10 @@ class UAVEnv(gym.Env):
         # Figure-8 (Lissajous) trajectory
         # x(t) = A * sin(a * t)
         # y(t) = B * sin(b * t)
-        # For a standard figure 8, a=1, b=2
         time = t * self.dt
         A, B = 2.0, 2.0
-        a, b = 1.0, 2.0
+        # Slow down the frequencies so the required acceleration stays within [-5, 5] bounds
+        a, b = 0.5, 1.0
 
         px = A * np.sin(a * time)
         py = B * np.sin(b * time)
