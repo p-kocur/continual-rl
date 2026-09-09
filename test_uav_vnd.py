@@ -31,29 +31,14 @@ def f_prior(state, action):
 class DifferentiableReward:
     def __init__(self, dt=0.1):
         self.dt = dt
-        # We need a way to track the step t in the BPTT rollout.
-        # But BPTT rollouts start from random buffer states which have different 't'
-        # In the paper, the policy doesn't receive 't', it receives the ref_state in observation.
-
-    def __call__(self, obs, action, next_obs):
-        # We assume the policy's observation contains the current ref_state.
-        # Wait, the trainer passes `state` to f_prior and reward_fn.
-        # If we pass true_state (4D), we don't have ref_state in it.
-        # The trainer expects reward_fn(state, action, next_state).
-
-        # We have a dilemma: The true_state is 4D (px,py,vx,vy), but reward depends on tracking the reference.
-        # To make BPTT work smoothly, we can put the reference state INTO the true_state that we pass to VND!
-        pass
-
-# Let's write a wrapper that makes the 'true_state' for VND contain both the drone state AND the reference state.
 class UAVEnvVNDWrapper:
     def __init__(self, env):
         self.env = env
         self.max_steps = env.max_steps
 
     def _pack(self, obs, info):
-        # obs is already [drone_state, ref_state] (8D)
-        # We will use this 8D vector as the 'true_state' for VND.
+        # obs is already [drone_state(4), ref0(4), ..., refH(4)]
+        # We will use this vector as the 'true_state' for VND.
         return obs
 
     def reset(self):
@@ -67,44 +52,35 @@ class UAVEnvVNDWrapper:
         return true_state, reward, terminated, truncated, info
 
 def f_prior_uav(state, action):
-    # state: [B, 8] -> [px, py, vx, vy, ref_px, ref_py, ref_vx, ref_vy]
+    # state: [B, 24] -> 4 drone state + 5 * 4 reference states
     dt = 0.1
 
-    px = state[:, 0]
-    py = state[:, 1]
-    vx = state[:, 2]
-    vy = state[:, 3]
-    ax = action[:, 0]
-    ay = action[:, 1]
+    px, py = state[:, 0], state[:, 1]
+    vx, vy = state[:, 2], state[:, 3]
+    ax, ay = action[:, 0], action[:, 1]
 
     new_vx = vx + ax * dt
     new_vy = vy + ay * dt
     new_px = px + new_vx * dt
     new_py = py + new_vy * dt
 
-    # For the reference state, the agent can't affect it.
-    # But during BPTT rollout, we need the reference state to advance forward in time!
-    # Because BPTT rolls out multiple steps into the future.
-    # If we don't know 't', we can roughly approximate ref_next = ref_curr + ref_v * dt
-    ref_px = state[:, 4]
-    ref_py = state[:, 5]
-    ref_vx = state[:, 6]
-    ref_vy = state[:, 7]
+    # We shift the reference horizon: ref_t becomes ref_{t+1}, etc.
+    # The last reference point is just duplicated because we don't know the exact curve beyond the horizon
+    # without explicitly recalculating the Lissajous equations here (which we could, but shifting is general).
+    new_refs = state[:, 8:].clone() # take ref1 ... refH
+    last_ref = state[:, -4:]        # take refH
 
-    # Simple linear extrapolation for the reference trajectory for short BPTT horizons
-    # This is a common trick when 't' is not explicitly available.
-    new_ref_px = ref_px + ref_vx * dt
-    new_ref_py = ref_py + ref_vy * dt
-    # Assume constant reference velocity for the short horizon
-    new_ref_vx = ref_vx
-    new_ref_vy = ref_vy
+    new_state = [new_px, new_py, new_vx, new_vy]
 
-    return torch.stack([new_px, new_py, new_vx, new_vy, new_ref_px, new_ref_py, new_ref_vx, new_ref_vy], dim=-1)
+    # Pack back together: [new_drone_state, new_refs, last_ref]
+    return torch.cat([torch.stack(new_state, dim=-1), new_refs, last_ref], dim=-1)
 
 def reward_fn_uav(state, action, next_state):
-    # next_state: [B, 8]
+    # next_state: [B, 24]
     px, py = next_state[:, 0], next_state[:, 1]
     vx, vy = next_state[:, 2], next_state[:, 3]
+
+    # The current reference state for this step is stored in indices 4:8
     ref_px, ref_py = next_state[:, 4], next_state[:, 5]
     ref_vx, ref_vy = next_state[:, 6], next_state[:, 7]
 
@@ -136,7 +112,7 @@ def evaluate_uav(trainer, env, episodes=5):
 
             if len(history) < trainer.context_len:
                 pad = trainer.context_len - len(history)
-                states = [np.zeros(8)] * pad + [h[0] for h in history]
+                states = [np.zeros(24)] * pad + [h[0] for h in history]
                 actions = [np.zeros(2)] * pad + [h[1] for h in history]
             else:
                 states = [h[0] for h in history[-trainer.context_len:]]
@@ -175,7 +151,7 @@ def main():
     print(f"Using device: {device}")
 
     trainer = ContinualVNDTrainer(
-        state_dim=8,
+        state_dim=24,
         action_dim=2,
         f_prior=f_prior_uav,
         reward_fn=reward_fn_uav,

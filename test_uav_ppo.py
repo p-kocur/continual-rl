@@ -45,9 +45,9 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Using device: {device}")
 
-    # Observation: 8D, Action: 2D Continuous
+    # Observation: 4 + 4*5 = 24D, Action: 2D Continuous
     agent = ContinuousPPOTrainer(
-        state_dim=8,
+        state_dim=24,
         action_dim=2,
         lr_actor=0.0003,
         lr_critic=0.001,
