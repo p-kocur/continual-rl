@@ -86,6 +86,10 @@ class ContinualVNDTrainer:
                 action_tensor = self.policy(state_tensor, z)
                 action = action_tensor.squeeze(0).cpu().numpy()
 
+                # Apply action scaling to ensure data collection matches policy evaluation scale
+                if self.state_dim == 24 and self.action_dim == 2:
+                    action = action * 5.0
+
             next_state, reward, terminated, truncated, _ = env.step(action)
             done = terminated or truncated
 
