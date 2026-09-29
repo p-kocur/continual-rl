@@ -5,8 +5,8 @@ class QuadrotorEnvVNDWrapper:
         self.env = env
         self.max_steps = env.max_steps
 
-    def reset(self):
-        obs, info = self.env.reset()
+    def reset(self, seed=None):
+        obs, info = self.env.reset(seed=seed)
         return obs, info
 
     def step(self, action):
