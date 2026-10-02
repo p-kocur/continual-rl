@@ -88,9 +88,11 @@ def plot_results(results, ref_xs, ref_ys):
     plt.title("UAV Trajectory Tracking (Wind Enabled)")
     plt.xlabel("X")
     plt.ylabel("Y")
+    plt.xlim(min(ref_xs) - 5, max(ref_xs) + 5)
+    plt.ylim(min(ref_ys) - 5, max(ref_ys) + 5)
+    plt.gca().set_aspect('equal', adjustable='box')
     plt.legend()
     plt.grid(True)
-    plt.axis('equal')
     plt.savefig("plots/comparison_trajectories.png", dpi=300)
     plt.close()
 
