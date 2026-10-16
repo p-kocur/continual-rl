@@ -23,6 +23,9 @@ class ContinualVNDTrainer:
                  lambda_mmd=0.1,
                  gamma=0.99,
                  buffer_capacity=100000,
+                 action_scale=None,
+                 dyn_dim=None,
+                 z_ema_alpha=0.15,
                  device="cpu"):
 
         self.state_dim = state_dim
@@ -33,6 +36,22 @@ class ContinualVNDTrainer:
         self.latent_dim = latent_dim
         self.gamma = gamma
         self.device = device
+        self.z_ema_alpha = z_ema_alpha
+
+        if action_scale is None:
+            self.action_scale = 5.0 if (self.state_dim == 24 and self.action_dim == 2) else 1.0
+        else:
+            self.action_scale = action_scale
+
+        if dyn_dim is None:
+            if self.state_dim == 24 and self.action_dim == 2:
+                self.dyn_dim = 4
+            elif self.action_dim == 3:
+                self.dyn_dim = 6
+            else:
+                self.dyn_dim = self.state_dim
+        else:
+            self.dyn_dim = dyn_dim
 
         self.lambda_rec = lambda_rec
         self.lambda_mmd = lambda_mmd
@@ -72,6 +91,7 @@ class ContinualVNDTrainer:
         """Collects experience from the environment using current policy and inferred latents."""
         state, _ = env.reset()
         history = deque(maxlen=self.context_len)
+        z_ema = None
 
         episode_reward = 0
         rewards = []
@@ -80,15 +100,20 @@ class ContinualVNDTrainer:
             # Infer latent z
             with torch.no_grad():
                 ctx_states, ctx_actions = self._get_context(history)
-                z = self.encoder(ctx_states, ctx_actions)
+                z_raw = self.encoder(ctx_states, ctx_actions)
+                if self.z_ema_alpha is not None:
+                    if z_ema is None:
+                        z_ema = z_raw
+                    else:
+                        z_ema = (1.0 - self.z_ema_alpha) * z_ema + self.z_ema_alpha * z_raw
+                    z = z_ema
+                else:
+                    z = z_raw
 
                 state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
                 action_tensor = self.policy(state_tensor, z)
                 action = action_tensor.squeeze(0).cpu().numpy()
-
-                # Apply action scaling to ensure data collection matches policy evaluation scale
-                if self.state_dim == 24 and self.action_dim == 2:
-                    action = action * 5.0
+                action = action * self.action_scale
 
             next_state, reward, terminated, truncated, _ = env.step(action)
             done = terminated or truncated
@@ -103,6 +128,7 @@ class ContinualVNDTrainer:
             if done:
                 state, _ = env.reset()
                 history.clear()
+                z_ema = None
                 rewards.append(episode_reward)
                 episode_reward = 0
 
@@ -130,8 +156,11 @@ class ContinualVNDTrainer:
             nominal_next_states = self.f_prior(states, actions)
             target_residual = next_states - nominal_next_states
 
-        # Dynamics loss
-        loss_dyn = huber_loss(pred_residual, target_residual)
+        # Dynamics loss: only penalize physical state residual, protecting lookahead references
+        if self.dyn_dim < self.state_dim:
+            loss_dyn = huber_loss(pred_residual[:, :self.dyn_dim], target_residual[:, :self.dyn_dim])
+        else:
+            loss_dyn = huber_loss(pred_residual, target_residual)
 
         # 3. Forward decoder (Reconstruction loss)
         reconstructed_context = self.decoder(z) # (B, C, state_dim + action_dim)
@@ -178,11 +207,8 @@ class ContinualVNDTrainer:
             # Get action from policy
             actions = self.policy(states, z)
 
-            # Temporary workaround for UAV action scaling
-            # In a clean implementation, ContinualVNDTrainer should accept an action_scale parameter
-            scaled_actions = actions
-            if self.state_dim == 24 and self.action_dim == 2:
-                scaled_actions = actions * 5.0
+            # Action scaling for BPTT dynamics rollout
+            scaled_actions = actions * self.action_scale
 
             # Predict next state using differentiable dynamics model
             # We want gradients to flow through f_prior for BPTT, but we don't want to update f_prior's parameters if it has any
@@ -191,7 +217,12 @@ class ContinualVNDTrainer:
             # The residual is differentiable, but we don't want to update residual parameters here.
             # We are just computing gradients wrt actions -> policy.
             pred_residual = self.residual(states, scaled_actions, z)
-            next_states = nominal_next_states + pred_residual
+            if self.dyn_dim < self.state_dim:
+                # Add residual only to physical states (pos and vel); keep references untouched
+                next_phys = nominal_next_states[:, :self.dyn_dim] + pred_residual[:, :self.dyn_dim]
+                next_states = torch.cat([next_phys, nominal_next_states[:, self.dyn_dim:]], dim=-1)
+            else:
+                next_states = nominal_next_states + pred_residual
 
             # Compute reward
             rewards = self.reward_fn(states, scaled_actions, next_states)

@@ -1,76 +1,68 @@
 import torch
+import numpy as np
+
 
 class QuadrotorEnvVNDWrapper:
+    """Thin wrapper to expose QuadrotorEnv to ContinualVNDTrainer."""
+
     def __init__(self, env):
         self.env = env
         self.max_steps = env.max_steps
 
     def reset(self, seed=None):
-        obs, info = self.env.reset(seed=seed)
-        return obs, info
+        return self.env.reset(seed=seed)
 
     def step(self, action):
-        obs, reward, terminated, truncated, info = self.env.step(action)
-        return obs, reward, terminated, truncated, info
+        return self.env.step(action)
+
 
 def f_prior_quadrotor(state, action):
     """
-    Simplified Differentiable 3D Rigid Body Kinematics for PyTorch BPTT.
-    State (27D): [pos(3), rpy(3), vel(3), ang_vel(3), ref0(3), ref1(3), ..., refH(3)]
-    Action (4D): [rpm1, rpm2, rpm3, rpm4] in [-1, 1] scaled range.
+    Closed-loop 2nd-order PD kinematics prior for PyBullet quadrotor with DSLPIDControl.
+
+    State (21D): [px, py, pz, vx, vy, vz, ref0(3), ref1(3), ..., ref4(3)]
+    Action  (3D): [dx, dy, dz] — position correction offset in meters (bounded ±0.5 m)
+
+    Dynamics:
+        target_pos = ref1 + action
+        a = Kp * (target_pos - p) - Kd * v
+        v_next = v + a * dt
+        p_next = p + v_next * dt
     """
-    # PyBullet CF2X parameters
-    dt = 1.0 / 240.0 * 5 # Base env does 5 sub-steps per action
-    m = 0.027
-    g = 9.81
-    # Simple hovering thrust mapping to accelerate
-    # We will highly approximate the 3D dynamics for the prior:
+    dt = 1.0 / 48.0  # matches CtrlAviary ctrl_freq=48 (0.020833 s)
+
+    # Closed-loop tracking coefficients identified from the DSLPIDControl physics
+    kp = torch.tensor([4.5, 4.0, 3.0], device=state.device, dtype=state.dtype)
+    kd = torch.tensor([0.5, 0.5, 1.0], device=state.device, dtype=state.dtype)
 
     pos = state[:, 0:3]
-    rpy = state[:, 3:6]
-    vel = state[:, 6:9]
-    ang_vel = state[:, 9:12]
+    vel = state[:, 3:6]
+    target_ref = state[:, 9:12]  # ref1 is the reference at next step t+1
 
-    # Very simplified mapping: action directly influences target angular velocities and z-acceleration
-    # Since modeling full quaternion dynamics here is extremely heavy, we provide a linearised kinematic model
-    # where actions correlate directly to [roll_cmd, pitch_cmd, yaw_cmd, thrust] mapped from the 4 motors.
-    # The VND residual will easily pick up the unmodeled complexities (which is the point of VND!)
+    target_pos = target_ref + action
+    accel = kp * (target_pos - pos) - kd * vel
 
-    # Motor mixing (CF2X setup)
-    u1, u2, u3, u4 = action[:, 0], action[:, 1], action[:, 2], action[:, 3]
-
-    thrust = (u1 + u2 + u3 + u4) * 0.25 # proxy for thrust
-    roll_cmd = (u1 - u2 - u3 + u4) * 0.1
-    pitch_cmd = (-u1 - u2 + u3 + u4) * 0.1
-    yaw_cmd = (-u1 + u2 - u3 + u4) * 0.1
-
-    # Integration
-    new_ang_vel = ang_vel + torch.stack([roll_cmd, pitch_cmd, yaw_cmd], dim=1) * dt
-    new_rpy = rpy + new_ang_vel * dt
-
-    # Acceleration in global frame (approximate small angle)
-    ax = g * new_rpy[:, 1] # pitch tilts thrust forward
-    ay = -g * new_rpy[:, 0] # roll tilts thrust sideways
-    az = (thrust * g) - g # 0 action = hovering
-
-    new_vel = vel + torch.stack([ax, ay, az], dim=1) * dt
+    new_vel = vel + accel * dt
     new_pos = pos + new_vel * dt
 
-    # Shift lookahead references
-    new_refs = state[:, 15:].clone()
+    # Shift lookahead references: ref1..ref4 become new ref0..ref3, duplicate last
+    new_refs = state[:, 9:].clone()
     last_ref = state[:, -3:]
 
-    new_state = torch.cat([new_pos, new_rpy, new_vel, new_ang_vel, new_refs, last_ref], dim=-1)
-    return new_state
+    return torch.cat([new_pos, new_vel, new_refs, last_ref], dim=-1)
+
 
 def reward_fn_quadrotor(state, action, next_state):
-    # Calculate position error based on current reference (indices 12:15)
+    """
+    Differentiable tracking reward: negative position error w.r.t. target reference.
+
+    next_state (21D): [pos(3), vel(3), ref0(3), ref1..ref4(3)]
+    At step t+1, ref0 (indices 6:9) holds the target position for this step.
+    """
     pos = next_state[:, 0:3]
-    ref_pos = next_state[:, 12:15]
+    ref_pos = next_state[:, 6:9]
 
     pos_error = torch.norm(pos - ref_pos, dim=1)
+    act_penalty = torch.sum(action**2, dim=1)
 
-    # Penalty for flying too low or flying away
-    out_of_bounds = torch.relu(0.05 - pos[:, 2]) + torch.relu(pos_error - 2.0)
-
-    return -pos_error - out_of_bounds * 50.0
+    return -(pos_error + 0.02 * act_penalty)
